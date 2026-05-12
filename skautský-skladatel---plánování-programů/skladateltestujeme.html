@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js";
+  import { getDatabase, ref, set, get, update, remove, onValue, off } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, updateProfile, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAgqIX3_OHPrh27vuMJsIUpKLjVLcxMOaU",
+    authDomain: "skladatel-progrmu-a-her.firebaseapp.com",
+    databaseURL: "https://skladatel-progrmu-a-her-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "skladatel-progrmu-a-her",
+    storageBucket: "skladatel-progrmu-a-her.firebasestorage.app",
+    messagingSenderId: "1088099395066",
+    appId: "1:1088099395066:web:38863cc7963b8a8fc27043"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+  const auth = getAuth(app);
+  const googleProvider = new GoogleAuthProvider();
+
+  // Global state
+  window.currentUser = null;
+  window.currentProjectId = null;
+  window.userProjects = [];
+  window.sharedProjects = [];
+  window.syncedProjects = [];
+  window.isAnonymous = false;
+
+  // Authentication functions
+  window.auth = {
+    async signInAnonymously() {
+      try {
+        const result = await signInAnonymously(auth);
+        console.log('Anonymous sign in successful');
+        return result.user;
+      } catch (error) {
+        console.error('Anonymous sign in error:', error);
+        throw error;
+      }
+    },
+
+    async signInWithEmail(email, password) {
+      try {
+        const result = await signInWithEmailAndPassword(auth, email, password);
+        console.log('Email sign in successful');
+        return result.user;
+      } catch (error) {
+        console.error('Email sign in error:', error);
+        throw error;
+      }
+    },
+
+    async signUpWithEmail(email, password, name) {
+      try {
+        const result = await createUserWithEmailAndPassword(auth, email, password);
+        const user = result.user;
+        await updateProfile(user, { displayName: name });
+        console.log('Sign up successful');
+        return user;
+      } catch (error) {
+        console.error('Sign up error:', error);
+        throw error;
+      }
+    },
+
+    async signInWithGoogle() {
+      try {
+        const result = await signInWithPopup(auth, googleProvider);
+        console.log('Google sign in successful');
+        return result.user;
+      } catch (error) {
+        console.error('Google sign in error:', error);
+        throw error;
+      }
+    },
+
+    async signOut() {
+      try {
+        await signOut(auth);
+        console.log('Sign out successful');
+      } catch (error) {
+        console.error('Sign out error:', error);
+        throw error;
+      }
+    }
+  };
+
+  // Auth state listener
+  onAuthStateChanged(auth, async (user) => {
+    window.currentUser = user;
+    window.isAnonymous = user ? user.isAnonymous : false;
+    
+    // Load local projects for all users
+    await loadLocalProjects();
+    
+    if (user) {
+      console.log('User signed in:', user.uid, user.displayName || 'Anonymous');
+      updateUserDisplay();
+      await loadUserProjects();
+      showMainApp();
+    } else {
+      console.log('User signed out');
+      updateUserDisplay();
+      showLoginScreen();
+    }
+    
+  });
+
+  function updateUserDisplay() {
+    const userBtn = document.getElementById('btnUser');
+    const userDisplay = document.getElementById('userDisplay');
+    
+    if (!userBtn || !userDisplay) return;
+    
+    if (window.currentUser) {
+      if (window.isAnonymous) {
+        userDisplay.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg> Anonym';
+        userBtn.title = 'Anonymní uživatel - omezené funkce';
+      } else {
+        const name = window.currentUser.displayName || window.currentUser.email || 'Uživatel';
+        userDisplay.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg> ' + (name.length > 10 ? name.substring(0, 10) + '...' : name);
+        userBtn.title = name;
+      }
+    } else {
+      userDisplay.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>';
+      userBtn.title = 'Nepřihlášen';
+    }
+  }
+
+  // Project management functions
+  async function loadLocalProjects() {
+    const stored = localStorage.getItem('localProjects') || '[]';
+    try {
+      window.localProjects = JSON.parse(stored);
+    } catch {
+      window.localProjects = [];
+    }
+  }
+
+  async function loadUserProjects() {
+    if (!window.currentUser) return;
+    
+    try {
+      // Load owned projects
+      const ownedRef = ref(db, `users/${window.currentUser.uid}/projects`);
+      const ownedSnapshot = await get(ownedRef);
+      window.userProjects = ownedSnapshot.exists() ? Object.values(ownedSnapshot.val()) : [];
+      
+      // Load shared projects
+      const sharedRef = ref(db, `users/${window.currentUser.uid}/sharedProjects`);
+      const sharedSnapshot = await get(sharedRef);
+      window.sharedProjects = sharedSnapshot.exists() ? Object.values(sharedSnapshot.val()) : [];
+      
+      // Load synced projects
+      const syncedRef = ref(db, `users/${window.currentUser.uid}/syncedProjects`);
+      const syncedSnapshot = await get(syncedRef);
+      window.syncedProjects = syncedSnapshot.exists() ? Object.values(syncedSnapshot.val()) : [];
+      
+      await loadLocalProjects();
+      renderDashboard();
+    } catch (error) {
+      console.error('Error loading projects:', error);
+    }
+  }
+
+  window.showLoginScreen = function() {
+    document.getElementById('loginScreen').classList.remove('hidden');
+    document.getElementById('mainApp').classList.add('hidden');
+  };
+
+  window.showMainApp = function() {
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('mainApp').classList.remove('hidden');
+    window.showDashboard();
+  };
+
+  window.showDashboard = function() {
+    document.getElementById('projectDashboard').classList.remove('hidden');
+    document.getElementById('workspace').classList.add('hidden');
+    document.querySelectorAll('.project-tools').forEach(btn => btn.classList.add('hidden'));
+    renderDashboard();
+  };
+
+  window.showWorkspace = function() {
+    document.getElementById('projectDashboard').classList.add('hidden');
+    document.getElementById('workspace').classList.remove('hidden');
+    document.querySelectorAll('.project-tools').forEach(btn => btn.classList.remove('hidden'));
+  };
+
+  async function renderDashboard() {
+    const container = document.getElementById('dashboardProjectList');
+    if (!container) return;
+
+    let content = '';
+    
+    // Moje projekty
+    content += '<div class="project-section mt-4"><h3 class="text-xl font-bold mb-4">Moje projekty</h3></div>';
+    if (window.userProjects.length === 0) {
+      content += '<p class="text-gray-500 text-sm">Žádné online projekty</p>';
+    } else {
+      window.userProjects.forEach(project => {
+        content += `<div class="project-card project-card-inline" onclick="loadProject('${project.id}')">
+          <div class="flex justify-between items-center w-full">
+            <div>
+              <div class="project-card-title">${project.name || 'Bez názvu'}</div>
+              <div class="project-card-meta text-xs text-gray-500">${project.updatedAt ? new Date(project.updatedAt).toLocaleDateString('cs-CZ') : 'Vlastní'}</div>
+            </div>
+            <button onclick="event.stopPropagation(); cloneProject('${project.id}')" class="px-2 py-1 bg-blue-100 text-blue-700 rounded-lg text-xs hover:bg-blue-200">Klonovat</button>
+          </div>
+        </div>`;
+      });
+    }
+
+    // Veřejná knihovna
+    content += '<div class="project-section mt-8"><h3 class="text-xl font-bold mb-4">Veřejná knihovna</h3></div>';
+    try {
+      const projectsRef = ref(db, 'projects');
+      const snapshot = await get(projectsRef);
+      if (snapshot.exists()) {
+        const allProjects = snapshot.val();
+        const publicProjects = Object.values(allProjects).filter(p => p.meta && p.meta.isPublic === true);
+        
+        if (publicProjects.length === 0) {
+          content += '<p class="text-gray-500 text-sm">Žádné veřejné projekty</p>';
+        } else {
+          publicProjects.forEach(project => {
+            content += `<div class="project-card project-card-inline" onclick="loadProject('${project.id}')">
+              <div class="flex justify-between items-center w-full">
+                <div>
+                  <div class="project-card-title">${project.meta?.name || 'Bez názvu'}</div>
+                  <div class="project-card-meta text-xs text-gray-500">
+                    Věk: ${project.meta?.targetAge || 'N/A'} | Čas: ${project.meta?.time || 'N/A'}
+                  </div>
+                </div>
+                <button onclick="event.stopPropagation(); cloneProject('${project.id}')" class="px-2 py-1 bg-green-100 text-green-700 rounded-lg text-xs hover:bg-green-200">🛠 Klonovat šablonu</button>
+              </div>
+            </div>`;
+          });
+        }
+      } else {
+        content += '<p class="text-gray-500 text-sm">Žádné veřejné projekty</p>';
+      }
+    } catch (e) {
+      console.error(e);
+      content += '<p class="text-red-500 text-sm">Chyba při načítání knihovny</p>';
+    }
+
+    container.innerHTML = content;
+  }
+
+  window.loadProject = async function(projectId) {
+    if (!projectId) return;
+    try {
+      const snapshot = await get(ref(db, `projects/${projectId}`));
+      if (!snapshot.exists()) {
+        alert('Projekt nebyl nalezen');
+        return;
+      }
+      const projectData = snapshot.val();
+      window.currentProjectId = projectId;
+      setProjectStateFromData(projectData);
+      
+      if (typeof renderAll === 'function') renderAll();
+      showWorkspace();
+    } catch (e) {
+      alert('Chyba: ' + e.message);
+    }
+  };
+
+  function setProjectStateFromData(projectData) {
+    const metaData = projectData.meta || {};
+    Object.assign(meta, metaData);
+    blocks = projectData.blocks || [];
+    groups = projectData.groups || groups;
+    
+    // Update inputs
+    document.getElementById('metaName').value = meta.name || '';
+    document.getElementById('metaAuthor').value = meta.author || '';
+    document.getElementById('metaAge').value = meta.age || '';
+    document.getElementById('metaTargetAge').value = meta.targetAge || '';
+    document.getElementById('metaTime').value = meta.time || '';
+    document.getElementById('metaPrep').value = meta.prep || '';
+    document.getElementById('metaIsPublic').checked = !!meta.isPublic;
+    renderLinksList();
+  }
+
+  window.createNewProject = async function() {
+    const projectName = prompt('Zadejte název nového projektu:');
+    if (!projectName || !window.currentUser) return;
+    
+    try {
+      const projectId = 'proj_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      const projectData = {
+        id: projectId,
+        name: projectName,
+        owner: window.currentUser.uid,
+        permissions: { [window.currentUser.uid]: 'owner' },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        meta: { name: projectName, isPublic: false, links: [] },
+        blocks: [],
+        groups: groups,
+        feedbackQuestions: []
+      };
+      
+      await update(ref(db, `projects/${projectId}`), projectData);
+      await update(ref(db, `users/${window.currentUser.uid}/projects/${projectId}`), {
+        id: projectId,
+        name: projectName,
+        updatedAt: projectData.updatedAt
+      });
+
+      await loadProject(projectId);
+    } catch (error) {
+      alert('Chyba: ' + error.message);
+    }
+  };
+
+  window.saveProject = async function() {
+    if (!window.currentProjectId || !window.currentUser) return;
+    
+    try {
+      const uid = window.currentUser.uid;
+      const snapshot = await get(ref(db, `projects/${window.currentProjectId}`));
+      if (snapshot.exists()) {
+        const project = snapshot.val();
+        if (project.permissions[uid] !== 'owner' && project.permissions[uid] !== 'editor') {
+          return alert('Nemáš oprávnění!');
+        }
+      }
+
+      const projectData = {
+        meta: meta,
+        blocks: blocks,
+        groups: groups,
+        updatedAt: new Date().toISOString()
+      };
+      
+      await update(ref(db, `projects/${window.currentProjectId}`), projectData);
+      await update(ref(db, `users/${uid}/projects/${window.currentProjectId}`), {
+        updatedAt: new Date().toISOString()
+      });
+      console.log('Project updated');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  window.cloneProject = async function(originalId) {
+    if (!window.currentUser) return alert('Pro klonování se musíte přihlásit');
+    try {
+      const snapshot = await get(ref(db, `projects/${originalId}`));
+      if (!snapshot.exists()) return alert('Projekt nenalezen');
+      
+      const original = snapshot.val();
+      const newId = 'proj_clone_' + Date.now();
+      const newData = {
+        ...original,
+        id: newId,
+        owner: window.currentUser.uid,
+        permissions: { [window.currentUser.uid]: 'owner' },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        meta: { ...original.meta, isPublic: false }
+      };
+      
+      await update(ref(db, `projects/${newId}`), newData);
+      await update(ref(db, `users/${window.currentUser.uid}/projects/${newId}`), {
+        id: newId,
+        name: newData.meta.name,
+        updatedAt: newData.updatedAt
+      });
+      
+      alert('Projekt úspěšně naklonován do vašich projektů!');
+      await loadUserProjects();
+      renderDashboard();
+    } catch (e) {
+      alert('Chyba při klonování: ' + e.message);
+    }
+  };
+
+  // Auth helper
+  window.handleEmailLogin = async function() {
+    const email = document.getElementById('loginEmail').value;
+    const password = document.getElementById('loginPassword').value;
+    try { await window.auth.signInWithEmail(email, password); } catch (e) { alert(e.message); }
+  };
+
+  window.handleGoogleLogin = async function() {
+    try { await window.auth.signInWithGoogle(); } catch (e) { alert(e.message); }
+  };
+
+  window.handleAnonymousLogin = async function() {
+    try { await window.auth.signInAnonymously(); } catch (e) { alert(e.message); }
+  };
+
+  window.showSignUpForm = function() {
+    document.getElementById('emailLoginForm').classList.add('hidden');
+    document.getElementById('signUpForm').classList.remove('hidden');
+  };
+
+  window.showLoginForm = function() {
+    document.getElementById('signUpForm').classList.add('hidden');
+    document.getElementById('emailLoginForm').classList.remove('hidden');
+  };
+
+</script>
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Skladatel skautských her</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+.bg-cream { background-color: #fff8ed; }
+.btn-primary { background-color: #294885; color: white; }
+.btn-positive { background-color: #008836; color: white; }
+.project-card { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 1rem; margin-bottom: 0.75rem; cursor: pointer; transition: all 0.2s; }
+.project-card:hover { border-color: #294885; transform: translateY(-2px); }
+.project-card-title { font-weight: bold; }
+.hidden { display: none; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+
+<!-- Login -->
+<div id="loginScreen" class="min-h-screen flex items-center justify-center bg-slate-100">
+  <div class="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl">
+    <div class="text-center mb-6">
+      <h2 class="text-2xl font-bold">Vítejte ve Skladateli</h2>
+    </div>
+    <div id="emailLoginForm" class="space-y-4">
+      <input id="loginEmail" type="email" placeholder="Email" class="w-full p-2 border rounded"/>
+      <input id="loginPassword" type="password" placeholder="Heslo" class="w-full p-2 border rounded"/>
+      <button onclick="handleEmailLogin()" class="w-full btn-primary py-2 rounded">Přihlásit se</button>
+      <button onclick="handleGoogleLogin()" class="w-full bg-red-600 text-white py-2 rounded">Google</button>
+      <button onclick="showSignUpForm()" class="w-full text-blue-600 text-sm">Vytvořit účet</button>
+      <button onclick="handleAnonymousLogin()" class="w-full text-slate-500 text-sm">Pokračovat anonymně</button>
+    </div>
+    <div id="signUpForm" class="space-y-4 hidden">
+       <input id="signUpName" placeholder="Jméno" class="w-full p-2 border rounded"/>
+       <input id="signUpEmail" placeholder="Email" class="w-full p-2 border rounded"/>
+       <input id="signUpPassword" type="password" placeholder="Heslo" class="w-full p-2 border rounded"/>
+       <button onclick="handleSignUp()" class="w-full btn-positive py-2 rounded">Zaregistrovat</button>
+       <button onclick="showLoginForm()" class="w-full text-blue-600 text-sm">Zpět k přihlášení</button>
+    </div>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="mainApp" class="hidden">
+  <header class="bg-white border-b p-4 flex justify-between items-center">
+    <h1 class="text-xl font-bold">Skladatel skautských her</h1>
+    <div class="flex gap-2">
+      <button onclick="showDashboard()" class="px-4 py-2 bg-slate-200 rounded">Dashboard</button>
+      <button id="btnUser" class="px-4 py-2 border rounded"><span id="userDisplay">Uživatel</span></button>
+    </div>
+  </header>
+
+  <div id="projectDashboard" class="p-8 max-w-4xl mx-auto">
+    <div class="flex justify-between items-center mb-6">
+      <h2 class="text-2xl font-bold">Moje projekty</h2>
+      <button onclick="createNewProject()" class="btn-primary px-4 py-2 rounded-lg font-bold">+ Nový projekt</button>
+    </div>
+    <div id="dashboardProjectList" class="space-y-4"></div>
+  </div>
+
+  <main id="workspace" class="hidden grid md:grid-cols-[400px_1fr] gap-6 p-6">
+    <aside class="space-y-6">
+      <section class="p-4 bg-white rounded-xl shadow-sm border">
+        <h2 class="font-bold mb-4">Základní metadata</h2>
+        <div class="space-y-3">
+          <label class="block text-sm">Název projektu <input id="metaName" class="w-full p-2 border rounded"/></label>
+          <label class="block text-sm">Autor <input id="metaAuthor" class="w-full p-2 border rounded"/></label>
+          <label class="block text-sm">Cílový věk <input id="metaTargetAge" class="w-full p-2 border rounded" placeholder="např. 12-15"/></label>
+          <label class="block text-sm">Předpokládaná délka <input id="metaTime" class="w-full p-2 border rounded" placeholder="např. 2 hodiny"/></label>
+          <label class="block text-sm">Náročnost (1-5) <input id="metaPrep" type="number" min="1" max="5" class="w-full p-2 border rounded"/></label>
+          <label class="flex items-center gap-2 text-sm mt-4">
+            <input id="metaIsPublic" type="checkbox" class="rounded"/> Veřejně zveřejnit v knihovně
+          </label>
+        </div>
+
+        <div class="mt-6 border-t pt-4">
+          <h3 class="font-bold text-sm mb-2">Odkazy (Zdroje)</h3>
+          <div id="linksList" class="space-y-2 mb-3"></div>
+          <div class="flex gap-2">
+            <input id="newLinkName" placeholder="Název" class="flex-1 p-1 text-xs border rounded"/>
+            <input id="newLinkUrl" placeholder="URL" class="flex-1 p-1 text-xs border rounded"/>
+            <button onclick="addLink()" class="px-2 py-1 bg-slate-200 text-xs rounded">Přidat</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="p-4 bg-white rounded-xl shadow-sm border">
+        <h2 class="font-bold mb-4">Akce</h2>
+        <button onclick="saveProject()" class="w-full btn-primary py-2 rounded-lg font-bold mb-2">Uložit projekt</button>
+        <button onclick="addBlock()" class="w-full btn-positive py-2 rounded-lg font-bold">Přidat blok</button>
+      </section>
+    </aside>
+
+    <section id="blocksContainer" class="bg-white p-6 rounded-xl shadow-sm border min-h-[600px]">
+      <h2 class="text-xl font-bold mb-4">Programové bloky</h2>
+      <div id="blocksList" class="space-y-4"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+  // Simple state for UI
+  let blocks = [];
+  let meta = { name: '', author: '', targetAge: '', time: '', prep: '', isPublic: false, links: [] };
+  let groups = [];
+
+  function addLink() {
+    const name = document.getElementById('newLinkName').value;
+    const url = document.getElementById('newLinkUrl').value;
+    if (!name || !url) return;
+    if (!meta.links) meta.links = [];
+    meta.links.push({ name, url });
+    document.getElementById('newLinkName').value = '';
+    document.getElementById('newLinkUrl').value = '';
+    renderLinksList();
+    saveProject();
+  }
+
+  function removeLink(idx) {
+    meta.links.splice(idx, 1);
+    renderLinksList();
+    saveProject();
+  }
+
+  function renderLinksList() {
+    const container = document.getElementById('linksList');
+    container.innerHTML = '';
+    (meta.links || []).forEach((link, idx) => {
+      container.innerHTML += `
+        <div class="flex justify-between items-center bg-slate-50 p-2 rounded border">
+          <a href="${link.url}" target="_blank" class="text-xs text-blue-600 underline truncate">${link.name}</a>
+          <button onclick="removeLink(${idx})" class="text-red-500 text-xs">Smazat</button>
+        </div>
+      `;
+    });
+  }
+
+  function addBlock() {
+    const id = Date.now().toString();
+    blocks.push({ id, title: 'Nový blok', content: '', duration: 15 });
+    renderBlocks();
+    saveProject();
+  }
+
+  function updateBlock(id, field, value) {
+    const block = blocks.find(b => b.id === id);
+    if (block) block[field] = value;
+    saveProject();
+  }
+
+  function deleteBlock(id) {
+    blocks = blocks.filter(b => b.id !== id);
+    renderBlocks();
+    saveProject();
+  }
+
+  function renderBlocks() {
+    const container = document.getElementById('blocksList');
+    container.innerHTML = '';
+    blocks.forEach(b => {
+      container.innerHTML += `
+        <div class="p-4 border rounded-lg bg-cream">
+          <div class="flex justify-between mb-2">
+            <input oninput="updateBlock('${b.id}', 'title', this.value)" class="font-bold border-none bg-transparent" value="${b.title}"/>
+            <button onclick="deleteBlock('${b.id}')" class="text-red-600 text-sm">Smazat</button>
+          </div>
+          <textarea oninput="updateBlock('${b.id}', 'content', this.value)" class="w-full p-2 border rounded h-24 mb-2">${b.content}</textarea>
+          <div class="flex gap-2 items-center text-sm">
+            Délka: <input type="number" oninput="updateBlock('${b.id}', 'duration', this.value)" class="w-16 p-1 border rounded" value="${b.duration}"/> min
+          </div>
+        </div>
+      `;
+    });
+  }
+
+  // Bind meta inputs
+  ['metaName', 'metaAuthor', 'metaTargetAge', 'metaTime', 'metaPrep'].forEach(id => {
+    document.getElementById(id).addEventListener('input', e => {
+      const field = id.replace('meta', '').charAt(0).toLowerCase() + id.replace('meta', '').slice(1);
+      meta[field] = e.target.value;
+      saveProject();
+    });
+  });
+  document.getElementById('metaIsPublic').addEventListener('change', e => {
+    meta.isPublic = e.target.checked;
+    saveProject();
+  });
+
+  window.renderAll = function() {
+    renderBlocks();
+    renderLinksList();
+  };
+</script>
+
+</body>
+</html>
